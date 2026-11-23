@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+*.pdb
+rapid_notes_config.json
+notes/
+Cargo.lock

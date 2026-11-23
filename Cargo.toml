@@ -1,0 +1,21 @@
+[package]
+name = "rapid_notes"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+egui_glass_ui = { path = "../egui_glass_ui" }
+eframe = { version = "0.31", default-features = false, features = ["glow"] }
+egui = { version = "0.31", default-features = false }
+serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+tray-icon = { version = "0.19", default-features = false }
+global-hotkey = { version = "0.6", default-features = false }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
