@@ -46,7 +46,6 @@ pub enum KeybindSlot {
     OpenSettings,
     HideWindow,
     ToggleAlwaysOnTop,
-    TogglePreview,
     CopyNote,
     ToggleChecklist,
     SearchNotes,
@@ -56,7 +55,7 @@ pub enum KeybindSlot {
 }
 
 impl KeybindSlot {
-    pub const ALL_IN_APP: [Self; 15] = [
+    pub const ALL_IN_APP: [Self; 14] = [
         Self::ToggleGridView,
         Self::PrevNote,
         Self::NextNote,
@@ -65,7 +64,6 @@ impl KeybindSlot {
         Self::OpenSettings,
         Self::HideWindow,
         Self::ToggleAlwaysOnTop,
-        Self::TogglePreview,
         Self::CopyNote,
         Self::ToggleChecklist,
         Self::SearchNotes,
@@ -84,7 +82,6 @@ impl KeybindSlot {
             Self::OpenSettings => "Open Settings",
             Self::HideWindow => "Hide to Tray / Exit Grid",
             Self::ToggleAlwaysOnTop => "Toggle Always on Top",
-            Self::TogglePreview => "Toggle Markdown Preview",
             Self::CopyNote => "Copy Note to Clipboard",
             Self::ToggleChecklist => "Toggle Checklist Item",
             Self::SearchNotes => "Search Notes",
@@ -104,7 +101,6 @@ impl KeybindSlot {
             Self::OpenSettings => "Ctrl+Comma",
             Self::HideWindow => "Escape",
             Self::ToggleAlwaysOnTop => "Alt+Shift+T",
-            Self::TogglePreview => "Ctrl+Shift+P",
             Self::CopyNote => "Ctrl+Shift+C",
             Self::ToggleChecklist => "Ctrl+L",
             Self::SearchNotes => "Ctrl+F",
@@ -128,7 +124,6 @@ pub struct Keybinds {
     pub open_settings: String,
     pub hide_window: String,
     pub toggle_always_on_top: String,
-    pub toggle_preview: String,
     pub copy_note: String,
     pub toggle_checklist: String,
     pub search_notes: String,
@@ -150,7 +145,6 @@ impl Default for Keybinds {
             open_settings: KeybindSlot::OpenSettings.default_shortcut().to_string(),
             hide_window: KeybindSlot::HideWindow.default_shortcut().to_string(),
             toggle_always_on_top: KeybindSlot::ToggleAlwaysOnTop.default_shortcut().to_string(),
-            toggle_preview: KeybindSlot::TogglePreview.default_shortcut().to_string(),
             copy_note: KeybindSlot::CopyNote.default_shortcut().to_string(),
             toggle_checklist: KeybindSlot::ToggleChecklist.default_shortcut().to_string(),
             search_notes: KeybindSlot::SearchNotes.default_shortcut().to_string(),
@@ -172,7 +166,6 @@ impl Keybinds {
             KeybindSlot::OpenSettings => &self.open_settings,
             KeybindSlot::HideWindow => &self.hide_window,
             KeybindSlot::ToggleAlwaysOnTop => &self.toggle_always_on_top,
-            KeybindSlot::TogglePreview => &self.toggle_preview,
             KeybindSlot::CopyNote => &self.copy_note,
             KeybindSlot::ToggleChecklist => &self.toggle_checklist,
             KeybindSlot::SearchNotes => &self.search_notes,
@@ -192,7 +185,6 @@ impl Keybinds {
             KeybindSlot::OpenSettings => self.open_settings = value,
             KeybindSlot::HideWindow => self.hide_window = value,
             KeybindSlot::ToggleAlwaysOnTop => self.toggle_always_on_top = value,
-            KeybindSlot::TogglePreview => self.toggle_preview = value,
             KeybindSlot::CopyNote => self.copy_note = value,
             KeybindSlot::ToggleChecklist => self.toggle_checklist = value,
             KeybindSlot::SearchNotes => self.search_notes = value,
@@ -254,7 +246,7 @@ impl Default for AppConfig {
             window_size: [580.0, 440.0],
             settings_window_pos: None,
             open_monitor: OpenMonitor::MainMonitor,
-            always_on_top: true,
+            always_on_top: false,
             start_hidden: false,
             hide_on_focus_loss: true,
             glass_tint_preset: GlassTintPreset::System,
@@ -343,6 +335,7 @@ mod tests {
         assert_eq!(cfg.keybinds.toggle_grid_view, "Alt+A");
         assert_eq!(cfg.keybinds.scroll_switch_modifier, ScrollModifier::Alt);
         assert!(cfg.hide_on_focus_loss);
+        assert!(!cfg.always_on_top);
         assert_eq!(cfg.open_monitor, OpenMonitor::MainMonitor);
 
         cfg.editor_font = "Consolas".to_string();
@@ -356,9 +349,11 @@ mod tests {
         assert_eq!(parsed.open_monitor, OpenMonitor::MouseMonitor);
         assert_eq!(parsed.keybinds.toggle_grid_view, "Ctrl+G");
 
-        // Legacy partial JSON deserializes cleanly with defaults
-        let partial: AppConfig =
-            serde_json::from_str(r#"{"editor_font_size": 99.0}"#).expect("partial json");
+        // Legacy partial JSON (including removed `toggle_preview` field) deserializes cleanly with defaults
+        let partial: AppConfig = serde_json::from_str(
+            r#"{"editor_font_size": 99.0, "keybinds": {"toggle_preview": "Ctrl+Shift+P"}}"#,
+        )
+        .expect("partial json");
         let mut clamped = partial;
         clamped.clamp_values();
         assert_eq!(clamped.editor_font_size, 32.0);

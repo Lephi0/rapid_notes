@@ -16,19 +16,6 @@ pub fn draw_grid_icon(painter: &Painter, c: Pos2, color: Color32) {
     }
 }
 
-pub fn draw_eye_icon(painter: &Painter, c: Pos2, color: Color32) {
-    let s = Stroke::new(1.55_f32, color);
-    let r = Rect::from_center_size(c, Vec2::new(14.4, 8.8));
-    painter.rect_stroke(r, CornerRadius::same(5), s, egui::StrokeKind::Middle);
-    painter.circle_filled(c, 2.4, color);
-}
-
-pub fn draw_edit_icon(painter: &Painter, c: Pos2, color: Color32) {
-    let s = Stroke::new(1.65_f32, color);
-    painter.line_segment([Pos2::new(c.x - 4.8, c.y + 4.8), Pos2::new(c.x + 4.8, c.y - 4.8)], s);
-    painter.line_segment([Pos2::new(c.x - 5.6, c.y + 5.6), Pos2::new(c.x - 2.6, c.y + 5.6)], s);
-}
-
 pub fn draw_copy_icon(painter: &Painter, c: Pos2, color: Color32) {
     let s = Stroke::new(1.5_f32, color);
     let back = Rect::from_center_size(c + Vec2::new(2.3, -2.3), Vec2::new(8.8, 9.8));

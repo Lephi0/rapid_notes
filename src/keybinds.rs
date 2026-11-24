@@ -29,7 +29,7 @@ impl SharedWakeState {
             egui_ctx: Mutex::new(None),
             hwnd: AtomicIsize::new(0),
             hidden: AtomicBool::new(false),
-            always_on_top: AtomicBool::new(true),
+            always_on_top: AtomicBool::new(false),
             quit_requested: AtomicBool::new(false),
         })
     }
@@ -794,7 +794,6 @@ pub enum InAppAction {
     OpenSettings,
     HideWindow,
     ToggleAlwaysOnTop,
-    TogglePreview,
     CopyNote,
     ToggleChecklist,
     SearchNotes,
@@ -840,10 +839,6 @@ pub fn poll_in_app_action(ctx: &egui::Context, keybinds: &Keybinds) -> Option<In
         ActionBinding {
             action: InAppAction::ToggleAlwaysOnTop,
             shortcut: &keybinds.toggle_always_on_top,
-        },
-        ActionBinding {
-            action: InAppAction::TogglePreview,
-            shortcut: &keybinds.toggle_preview,
         },
         ActionBinding {
             action: InAppAction::CopyNote,

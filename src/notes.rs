@@ -177,7 +177,8 @@ Fast, translucent Windows scratchpad — every note is a local .md file.
 - **Ctrl+N**: New note   |   **Ctrl+,**: Settings
 
 ## Checklist & Inline Math
-- [ ] Hover top edge for quick icons (New, Grid, Preview, Copy, Pin, Settings)
+- [ ] Click any [ ] checkbox to toggle it directly (or press Ctrl+L)
+- [ ] Hover top edge for quick icons (New, Grid, Copy, Pin, Settings, Hide)
 - [ ] Hover bottom edge for horizontal note navigation
 - [x] Courier New default font & Markdown editing
 

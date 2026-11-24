@@ -1,6 +1,6 @@
 use egui::{
     text::{LayoutJob, TextFormat},
-    Color32, CornerRadius, FontFamily, FontId, Frame, Margin, Stroke, Ui,
+    Color32, FontFamily, FontId, Stroke,
 };
 use egui_glass_ui::{
     GlassPalette, EDITOR_BOLD_FONT_FAMILY, EDITOR_FONT_FAMILY, EDITOR_ITALIC_FONT_FAMILY,
@@ -302,6 +302,12 @@ fn checklist_prefix_len(trimmed: &str) -> Option<(usize, bool)> {
             return Some((prefix.len(), true));
         }
     }
+    if matches!(trimmed, "- [ ]" | "* [ ]") {
+        return Some((5, false));
+    }
+    if matches!(trimmed, "- [x]" | "- [X]" | "* [x]" | "* [X]") {
+        return Some((5, true));
+    }
     None
 }
 
@@ -572,7 +578,8 @@ pub fn handle_smart_enter(content: &mut String, cursor_char_idx: usize) -> Optio
     Some(byte_to_char_idx(content, new_byte))
 }
 
-/// Toggles `- [ ] ` <-> `- [x] ` on the cursor's current line, or adds `- [ ] ` if plain text.
+/// Toggles `- [ ] ` <-> `- [x] ` (including `* ` bullets and bare end-of-line checkboxes)
+/// on the cursor's current line, or adds `- [ ] ` if plain text.
 pub fn toggle_checklist_at_cursor(content: &mut String, cursor_char_idx: usize) -> usize {
     let cursor_byte = char_to_byte_idx(content, cursor_char_idx);
     let line_start = content[..cursor_byte].rfind('\n').map_or(0, |p| p + 1);
@@ -585,13 +592,12 @@ pub fn toggle_checklist_at_cursor(content: &mut String, cursor_char_idx: usize) 
     let rest = &line[indent_len..];
 
     let (replacement, byte_delta): (String, isize) =
-        if let Some(after) = rest.strip_prefix("- [ ] ") {
-            (format!("{indent}- [x] {after}"), 0)
-        } else if let Some(after) = rest
-            .strip_prefix("- [x] ")
-            .or_else(|| rest.strip_prefix("- [X] "))
-        {
-            (format!("{indent}- [ ] {after}"), 0)
+        if let Some((prefix_len, checked)) = checklist_prefix_len(rest) {
+            let bullet = &rest[..1];
+            let mark = if checked { ' ' } else { 'x' };
+            let sep = if prefix_len == 6 { " " } else { "" };
+            let after = &rest[prefix_len..];
+            (format!("{indent}{bullet} [{mark}]{sep}{after}"), 0)
         } else if let Some(after) = rest.strip_prefix("- ") {
             (format!("{indent}- [ ] {after}"), 4)
         } else if let Some(after) = rest.strip_prefix("* ") {
@@ -636,179 +642,81 @@ pub fn wrap_selection(
     }
 }
 
-/// Renders an interactive Markdown preview with clickable checklist checkboxes.
-/// Returns `true` if any checkbox was toggled in `content`.
-pub fn render_markdown_preview(
-    ui: &mut Ui,
-    content: &mut String,
-    font_size: f32,
-    palette: &GlassPalette,
-) -> bool {
-    let lines: Vec<String> = content.split('\n').map(|s| s.to_string()).collect();
-    let mut toggle_line: Option<(usize, bool)> = None;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChecklistBoxSpan {
+    pub line_idx: usize,
+    /// Char index of `[` in the full document (for `egui::Galley::pos_from_ccursor`).
+    pub box_start_char: usize,
+    /// Char index immediately after `]` (`box_start_char + 3`).
+    pub box_end_char: usize,
+    /// Char index immediately after the checklist prefix (`- [ ] ` or `- [ ]`).
+    pub after_prefix_char: usize,
+    /// Byte index of the ASCII state byte inside `[...]` (`' '`, `'x'`, or `'X'`).
+    pub state_byte: usize,
+    pub checked: bool,
+}
+
+/// Finds all Markdown task-list checkboxes outside fenced code blocks in `content`.
+pub fn find_checklist_boxes(content: &str) -> Vec<ChecklistBoxSpan> {
+    let mut boxes = Vec::new();
     let mut in_code_fence = false;
-    let mut code_buffer = String::new();
+    let mut line_start_byte = 0usize;
+    let mut line_start_char = 0usize;
 
-    ui.spacing_mut().item_spacing.y = 4.0;
+    for (line_idx, raw_line) in content.split_inclusive('\n').enumerate() {
+        let cur_byte = line_start_byte;
+        let cur_char = line_start_char;
+        line_start_byte += raw_line.len();
+        line_start_char += raw_line.chars().count();
 
-    for (idx, line) in lines.iter().enumerate() {
-        let trimmed = line.trim();
+        let line_body = raw_line
+            .strip_suffix("\r\n")
+            .or_else(|| raw_line.strip_suffix('\n'))
+            .unwrap_or(raw_line);
+        let trimmed = line_body.trim_start();
+        let leading_bytes = line_body.len() - trimmed.len();
+        let leading_chars = line_body[..leading_bytes].chars().count();
+
         if trimmed.starts_with("```") {
-            if in_code_fence {
-                render_code_block(ui, &code_buffer, font_size, palette);
-                code_buffer.clear();
-                in_code_fence = false;
-            } else {
-                in_code_fence = true;
-            }
+            in_code_fence = !in_code_fence;
             continue;
         }
         if in_code_fence {
-            if !code_buffer.is_empty() {
-                code_buffer.push('\n');
-            }
-            code_buffer.push_str(line);
-            continue;
-        }
-
-        if trimmed.is_empty() {
-            ui.add_space(font_size * 0.45);
-            continue;
-        }
-
-        if is_horizontal_rule(trimmed) {
-            let (rect, _) =
-                ui.allocate_exact_size(egui::Vec2::new(ui.available_width(), 8.0), egui::Sense::hover());
-            let y = rect.center().y;
-            ui.painter().line_segment(
-                [egui::Pos2::new(rect.min.x, y), egui::Pos2::new(rect.max.x, y)],
-                Stroke::new(1.0_f32, palette.divider),
-            );
-            continue;
-        }
-
-        if let Some(prefix_len) = heading_prefix_len(trimmed) {
-            let hashes = trimmed[..prefix_len].trim_end().len();
-            let scale = match hashes {
-                1 => 1.22,
-                2 => 1.14,
-                _ => 1.07,
-            };
-            let h_size = (font_size * scale).round();
-            render_rich_line(
-                ui,
-                &trimmed[prefix_len..],
-                h_size,
-                palette,
-                true,
-                palette.primary_text,
-            );
             continue;
         }
 
         if let Some((prefix_len, checked)) = checklist_prefix_len(trimmed) {
-            let body = &trimmed[prefix_len..];
-            ui.horizontal(|ui| {
-                let mut val = checked;
-                if ui.checkbox(&mut val, "").changed() {
-                    toggle_line = Some((idx, val));
-                }
-                let color = if checked {
-                    palette.muted_text
-                } else {
-                    palette.primary_text
-                };
-                render_rich_line(ui, body, font_size, palette, false, color);
+            let box_start_char = cur_char + leading_chars + 2;
+            boxes.push(ChecklistBoxSpan {
+                line_idx,
+                box_start_char,
+                box_end_char: box_start_char + 3,
+                after_prefix_char: cur_char + leading_chars + prefix_len,
+                state_byte: cur_byte + leading_bytes + 3,
+                checked,
             });
-            continue;
-        }
-
-        if trimmed.starts_with('>') {
-            let body = trimmed.trim_start_matches('>').trim_start();
-            Frame::NONE
-                .fill(palette.card_fill)
-                .inner_margin(Margin::symmetric(10, 4))
-                .stroke(Stroke::new(1.0_f32, palette.card_stroke))
-                .corner_radius(CornerRadius::same(6))
-                .show(ui, |ui| {
-                    render_rich_line(ui, body, font_size, palette, false, palette.secondary_text);
-                });
-            continue;
-        }
-
-        if let Some(marker_len) = list_prefix_len(trimmed) {
-            let marker = trimmed[..marker_len].trim();
-            let body = &trimmed[marker_len..];
-            ui.horizontal_top(|ui| {
-                ui.label(
-                    egui::RichText::new(if marker == "-" || marker == "*" {
-                        "•".to_string()
-                    } else {
-                        marker.to_string()
-                    })
-                    .font(editor_bold_font(font_size))
-                    .color(palette.accent_text),
-                );
-                render_rich_line(ui, body, font_size, palette, false, palette.primary_text);
-            });
-            continue;
-        }
-
-        render_rich_line(ui, trimmed, font_size, palette, false, palette.primary_text);
-    }
-
-    if in_code_fence && !code_buffer.is_empty() {
-        render_code_block(ui, &code_buffer, font_size, palette);
-    }
-
-    if let Some((line_idx, checked)) = toggle_line {
-        let mut updated = lines;
-        if let Some(target) = updated.get_mut(line_idx) {
-            if checked {
-                *target = target.replacen("- [ ] ", "- [x] ", 1).replacen("* [ ] ", "* [x] ", 1);
-            } else {
-                *target = target
-                    .replacen("- [x] ", "- [ ] ", 1)
-                    .replacen("- [X] ", "- [ ] ", 1)
-                    .replacen("* [x] ", "* [ ] ", 1)
-                    .replacen("* [X] ", "* [ ] ", 1);
-            }
-            *content = updated.join("\n");
-            return true;
         }
     }
 
-    false
+    boxes
 }
 
-fn render_code_block(ui: &mut Ui, code: &str, font_size: f32, palette: &GlassPalette) {
-    Frame::NONE
-        .fill(palette.code_bg)
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::symmetric(10, 8))
-        .stroke(Stroke::new(1.0_f32, palette.card_stroke))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.label(
-                egui::RichText::new(code)
-                    .font(editor_regular_font((font_size * 0.92).max(9.0)))
-                    .color(palette.secondary_text),
-            );
-        });
-}
-
-fn render_rich_line(
-    ui: &mut Ui,
-    line: &str,
-    font_size: f32,
-    palette: &GlassPalette,
-    force_bold: bool,
-    base_color: Color32,
-) {
-    let mut job = LayoutJob::default();
-    job.wrap.max_width = ui.available_width().max(80.0);
-    append_inline_markdown(&mut job, line, font_size, palette, force_bold, base_color);
-    ui.label(job);
+/// Toggles the ASCII state byte (`' '` <-> `'x'`, or `'X'` -> `' '`) inside `[...]` at `state_byte`.
+pub fn toggle_checklist_box_at_byte(content: &mut String, state_byte: usize) -> bool {
+    let bytes = content.as_bytes();
+    if state_byte == 0 || state_byte + 1 >= bytes.len() {
+        return false;
+    }
+    if bytes[state_byte - 1] != b'[' || bytes[state_byte + 1] != b']' {
+        return false;
+    }
+    let replacement = match bytes[state_byte] {
+        b' ' => "x",
+        b'x' | b'X' => " ",
+        _ => return false,
+    };
+    content.replace_range(state_byte..state_byte + 1, replacement);
+    true
 }
 
 #[cfg(test)]
@@ -817,7 +725,7 @@ mod tests {
 
     #[test]
     fn test_layout_job_preserves_exact_bytes() {
-        let sample = "# Title\n\n## Section **bold** *italic* `code`\n- [ ] Task one\n- [x] Done\n> Quote [link](https://example.com)\n```\ncode block\n```\n";
+        let sample = "# Title\n\n## Section **bold** *italic* `code`\n- [ ] Task one\n- [x] Done\n- [ ]\n> Quote [link](https://example.com)\n```\ncode block\n```\n";
         let palette = GlassPalette::for_theme(false);
         let job = build_markdown_layout_job(sample, 420.0, 15.0, &palette, true);
         assert_eq!(job.text, sample);
@@ -854,6 +762,70 @@ mod tests {
         assert_eq!(c1, 9);
         toggle_checklist_at_cursor(&mut item, c1);
         assert_eq!(item, "- [x] Buy coffee");
+
+        let mut bare = "  * [X]".to_string();
+        let c2 = toggle_checklist_at_cursor(&mut bare, 2);
+        assert_eq!(bare, "  * [ ]");
+        assert_eq!(c2, 2);
+        toggle_checklist_at_cursor(&mut bare, c2);
+        assert_eq!(bare, "  * [x]");
+    }
+
+    #[test]
+    fn test_find_checklist_boxes_offsets_and_code_fences() {
+        let doc = "Café — note\n  - [ ] First\n* [x] Second\n```\n- [ ] inside fence\n```\n- [X] Upper\n- [ ]nospace\n- [ ]";
+        let boxes = find_checklist_boxes(doc);
+        assert_eq!(boxes.len(), 4);
+
+        // Line 1: "  - [ ] First" (preceded by "Café — note\n": 12 chars, 15 bytes because é=2 bytes, —=3 bytes)
+        assert_eq!(boxes[0].line_idx, 1);
+        assert_eq!(boxes[0].box_start_char, 12 + 2 + 2);
+        assert_eq!(boxes[0].box_end_char, boxes[0].box_start_char + 3);
+        assert_eq!(boxes[0].after_prefix_char, 12 + 2 + 6);
+        assert_eq!(boxes[0].state_byte, 15 + 2 + 3);
+        assert!(!boxes[0].checked);
+        assert_eq!(&doc[boxes[0].state_byte..boxes[0].state_byte + 1], " ");
+
+        // Line 2: "* [x] Second"
+        assert_eq!(boxes[1].line_idx, 2);
+        assert!(boxes[1].checked);
+        assert_eq!(&doc[boxes[1].state_byte..boxes[1].state_byte + 1], "x");
+
+        // Lines 3..5 fenced code block skipped -> Line 6: "- [X] Upper"
+        assert_eq!(boxes[2].line_idx, 6);
+        assert!(boxes[2].checked);
+        assert_eq!(&doc[boxes[2].state_byte..boxes[2].state_byte + 1], "X");
+
+        // Line 7 "- [ ]nospace" ignored -> Line 8: bare "- [ ]"
+        assert_eq!(boxes[3].line_idx, 8);
+        assert!(!boxes[3].checked);
+        assert_eq!(
+            boxes[3].after_prefix_char,
+            boxes[3].box_start_char + 3
+        );
+        assert_eq!(&doc[boxes[3].state_byte..boxes[3].state_byte + 1], " ");
+    }
+
+    #[test]
+    fn test_toggle_checklist_box_at_byte() {
+        let mut doc = "Café\n  * [ ] Task 1\n- [X] Task 2\n- [x]".to_string();
+        let boxes = find_checklist_boxes(&doc);
+        assert_eq!(boxes.len(), 3);
+
+        assert!(toggle_checklist_box_at_byte(&mut doc, boxes[0].state_byte));
+        assert!(toggle_checklist_box_at_byte(&mut doc, boxes[1].state_byte));
+        assert!(toggle_checklist_box_at_byte(&mut doc, boxes[2].state_byte));
+        assert_eq!(doc, "Café\n  * [x] Task 1\n- [ ] Task 2\n- [ ]");
+
+        // Toggle back from 'x' -> ' '
+        assert!(toggle_checklist_box_at_byte(&mut doc, boxes[0].state_byte));
+        assert_eq!(doc, "Café\n  * [ ] Task 1\n- [ ] Task 2\n- [ ]");
+
+        // Safety guards for out-of-bounds and non-checkbox bytes
+        let doc_len = doc.len();
+        assert!(!toggle_checklist_box_at_byte(&mut doc, 0));
+        assert!(!toggle_checklist_box_at_byte(&mut doc, doc_len));
+        assert!(!toggle_checklist_box_at_byte(&mut doc, 1));
     }
 
     #[test]

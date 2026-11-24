@@ -24,24 +24,24 @@ use egui_glass_ui::{
     glass_icon_button, glass_pagination_dots, glass_primary_button, glass_toast_pill,
     hide_window, hover_chrome_opacity, install_glass_fonts, is_pos_on_any_monitor,
     is_window_foreground, is_windows_light_theme, position_window_px_no_activate,
-    resize_window_px, resolve_window_pos_in_work_area, set_window_cloaked,
-    set_window_pos_px_checked, show_window_at_px, show_window_to_front,
+    resize_window_px, resolve_window_pos_in_work_area, set_window_always_on_top,
+    set_window_cloaked, set_window_pos_px_checked, show_window_at_px, show_window_to_front,
     trim_process_working_set, unregister_raw_keyboard_input, BackgroundMode, GlassPalette,
     GlassStyle, GlassTintPreset, GlassWindow, GlassWindowBackdrop, GlassWindowConfig,
     EDITOR_FONT_FAMILY,
 };
 use icons::{
-    draw_chevron_left_icon, draw_chevron_right_icon, draw_copy_icon, draw_edit_icon,
-    draw_eye_icon, draw_gear_icon, draw_grid_icon, draw_hide_icon, draw_mini_app_badge,
-    draw_pin_icon, draw_plus_icon, draw_search_icon, draw_trash_icon, draw_undo_icon,
+    draw_chevron_left_icon, draw_chevron_right_icon, draw_copy_icon, draw_gear_icon,
+    draw_grid_icon, draw_hide_icon, draw_mini_app_badge, draw_pin_icon, draw_plus_icon,
+    draw_search_icon, draw_trash_icon, draw_undo_icon,
 };
 use keybinds::{
     capture_shortcut, normalize_shortcut, poll_in_app_action, GlobalHotkeyController, InAppAction,
     ScrollNoteSwitcher, SharedWakeState,
 };
 use markdown::{
-    build_markdown_layout_job, handle_smart_enter, render_markdown_preview,
-    toggle_checklist_at_cursor, wrap_selection,
+    build_markdown_layout_job, find_checklist_boxes, handle_smart_enter,
+    toggle_checklist_at_cursor, toggle_checklist_box_at_byte, wrap_selection, ChecklistBoxSpan,
 };
 use math::{evaluate_note_math, LineMathResult};
 use notes::{format_relative_time, word_and_char_count, NoteStore};
@@ -151,7 +151,6 @@ struct RapidNotesApp {
     saved_editor_pos_px: Option<[i32; 2]>,
     pending_cloak_rect_px: Option<([i32; 2], [i32; 2])>,
     uncloak_frames_remaining: u8,
-    preview_mode: bool,
     search_open: bool,
     search_query: String,
     grid_selected_idx: usize,
@@ -197,11 +196,13 @@ impl RapidNotesApp {
         let _ = unregister_raw_keyboard_input();
         let windows_is_light = is_windows_light_theme();
 
+        let start_hidden = config.start_hidden && !config.always_on_top;
+
         let wake_state = SharedWakeState::new();
         wake_state.set_ctx(cc.egui_ctx.clone());
         wake_state.set_hwnd(hwnd);
         wake_state.set_always_on_top(config.always_on_top);
-        wake_state.set_hidden(config.start_hidden);
+        wake_state.set_hidden(start_hidden);
 
         let hotkey_controller =
             GlobalHotkeyController::new(&config.keybinds.global_toggle_app, Arc::clone(&wake_state));
@@ -218,10 +219,11 @@ impl RapidNotesApp {
         config.window_pos = Some([target_px[0] as f32, target_px[1] as f32]);
         let _ = config.save();
 
-        if config.start_hidden {
+        if start_hidden {
             hide_window(hwnd);
         } else {
             show_window_to_front(hwnd, config.always_on_top);
+            set_window_always_on_top(hwnd, config.always_on_top);
         }
 
         let settings_window = Some(GlassWindow::new(
@@ -250,7 +252,7 @@ impl RapidNotesApp {
         }
 
         let grid_selected_idx = notes.active_idx;
-        let window_hidden = config.start_hidden;
+        let window_hidden = start_hidden;
 
         let mut app = Self {
             config,
@@ -276,7 +278,6 @@ impl RapidNotesApp {
             saved_editor_pos_px: None,
             pending_cloak_rect_px: None,
             uncloak_frames_remaining: 0,
-            preview_mode: false,
             search_open: false,
             search_query: String::new(),
             grid_selected_idx,
@@ -469,7 +470,7 @@ impl RapidNotesApp {
 
         self.backdrop.invalidate();
         self.ensure_dwm_synced();
-        if self.view_mode == ViewMode::Editor && !self.preview_mode {
+        if self.view_mode == ViewMode::Editor {
             self.editor_focus_pending = true;
         }
         ctx.request_repaint();
@@ -480,7 +481,12 @@ impl RapidNotesApp {
             && is_window_foreground(self.hwnd)
             && self.shown_at.elapsed() >= Duration::from_millis(180)
         {
-            self.hide_to_tray(ctx);
+            if self.config.always_on_top {
+                self.show_toast("Pinned on top — unpin to hide");
+                ctx.request_repaint();
+            } else {
+                self.hide_to_tray(ctx);
+            }
         } else {
             self.show_and_focus_window(ctx);
         }
@@ -538,7 +544,7 @@ impl RapidNotesApp {
         self.last_observed_pos_px = Some(restored_px);
         self.pos_dirty_since = None;
 
-        if focus_editor && !self.preview_mode {
+        if focus_editor {
             self.editor_focus_pending = true;
         }
 
@@ -553,6 +559,7 @@ impl RapidNotesApp {
         } else {
             WindowLevel::Normal
         };
+        set_window_always_on_top(self.hwnd, enabled);
         ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::WindowLevel(level));
         self.backdrop.invalidate();
         self.ensure_dwm_synced();
@@ -623,7 +630,6 @@ impl RapidNotesApp {
         if self.view_mode == ViewMode::Grid {
             self.exit_grid_mode(ctx, true);
         }
-        self.preview_mode = false;
         self.grid_selected_idx = self.notes.active_idx;
         self.pending_cursor_pos = Some((0, 0));
         self.editor_focus_pending = true;
@@ -640,7 +646,7 @@ impl RapidNotesApp {
             let _ = self.config.save();
             self.grid_selected_idx = self.notes.active_idx;
             self.pending_cursor_pos = Some((0, 0));
-            if self.view_mode == ViewMode::Editor && !self.preview_mode {
+            if self.view_mode == ViewMode::Editor {
                 self.editor_focus_pending = true;
             }
             self.slide_dir = dir_hint;
@@ -657,7 +663,7 @@ impl RapidNotesApp {
             let _ = self.config.save();
             self.grid_selected_idx = new_idx;
             self.pending_cursor_pos = Some((0, 0));
-            if self.view_mode == ViewMode::Editor && !self.preview_mode {
+            if self.view_mode == ViewMode::Editor {
                 self.editor_focus_pending = true;
             }
             self.slide_dir = if new_idx > prev { 1.0 } else { -1.0 };
@@ -675,7 +681,7 @@ impl RapidNotesApp {
             let _ = self.config.save();
             self.grid_selected_idx = self.notes.active_idx;
             self.pending_cursor_pos = Some((0, 0));
-            if self.view_mode == ViewMode::Editor && !self.preview_mode {
+            if self.view_mode == ViewMode::Editor {
                 self.editor_focus_pending = true;
             }
             self.show_toast("Note deleted");
@@ -725,6 +731,9 @@ impl RapidNotesApp {
                 TrayAction::ToggleAlwaysOnTop => {
                     let next = !self.config.always_on_top;
                     self.set_always_on_top(ctx, next);
+                    if next && self.window_hidden {
+                        self.show_and_focus_window(ctx);
+                    }
                 }
                 TrayAction::OpenNotesFolder => {
                     self.open_notes_folder_in_explorer();
@@ -750,6 +759,7 @@ impl RapidNotesApp {
 
     fn should_hide_on_focus_loss(
         hide_on_focus_loss: bool,
+        always_on_top: bool,
         is_focused: bool,
         had_focus_since_show: bool,
         shown_elapsed: Duration,
@@ -762,6 +772,7 @@ impl RapidNotesApp {
         current_foreground: Option<isize>,
     ) -> bool {
         if !hide_on_focus_loss
+            || always_on_top
             || is_focused
             || startup_frames < 5
             || uncloak_frames_remaining > 0
@@ -820,6 +831,7 @@ impl RapidNotesApp {
             if !is_focused
                 && Self::should_hide_on_focus_loss(
                     self.config.hide_on_focus_loss,
+                    self.config.always_on_top,
                     is_focused,
                     self.had_focus_since_show,
                     self.shown_at.elapsed(),
@@ -902,11 +914,13 @@ impl RapidNotesApp {
                 if self.search_open {
                     self.search_open = false;
                     self.search_query.clear();
-                    if self.view_mode == ViewMode::Editor && !self.preview_mode {
+                    if self.view_mode == ViewMode::Editor {
                         self.editor_focus_pending = true;
                     }
                 } else if self.view_mode == ViewMode::Grid {
                     self.exit_grid_mode(ctx, true);
+                } else if self.config.always_on_top {
+                    self.show_toast("Pinned on top — unpin to hide");
                 } else {
                     self.hide_to_tray(ctx);
                 }
@@ -920,15 +934,6 @@ impl RapidNotesApp {
                     "Unpinned from top"
                 });
             }
-            InAppAction::TogglePreview => {
-                if self.view_mode == ViewMode::Grid {
-                    self.exit_grid_mode(ctx, false);
-                }
-                self.preview_mode = !self.preview_mode;
-                if !self.preview_mode {
-                    self.editor_focus_pending = true;
-                }
-            }
             InAppAction::CopyNote => {
                 let idx = if self.view_mode == ViewMode::Grid {
                     self.grid_selected_idx
@@ -941,7 +946,7 @@ impl RapidNotesApp {
                 }
             }
             InAppAction::ToggleChecklist => {
-                if self.view_mode == ViewMode::Editor && !self.preview_mode {
+                if self.view_mode == ViewMode::Editor {
                     let editor_id = Id::new(EDITOR_WIDGET_ID);
                     let cursor_idx = TextEdit::load_state(ctx, editor_id)
                         .and_then(|s| s.cursor.char_range())
@@ -960,13 +965,13 @@ impl RapidNotesApp {
                     self.search_focus_pending = true;
                 } else {
                     self.search_query.clear();
-                    if self.view_mode == ViewMode::Editor && !self.preview_mode {
+                    if self.view_mode == ViewMode::Editor {
                         self.editor_focus_pending = true;
                     }
                 }
             }
             InAppAction::FormatBold | InAppAction::FormatItalic | InAppAction::FormatCode => {
-                if self.view_mode == ViewMode::Editor && !self.preview_mode {
+                if self.view_mode == ViewMode::Editor {
                     let delim = match action {
                         InAppAction::FormatBold => "**",
                         InAppAction::FormatItalic => "*",
@@ -988,7 +993,7 @@ impl RapidNotesApp {
     }
 
     fn handle_editor_key_enhancements(&mut self, ctx: &Context, math_results: &[LineMathResult]) {
-        if self.view_mode != ViewMode::Editor || self.preview_mode {
+        if self.view_mode != ViewMode::Editor {
             return;
         }
         let editor_id = Id::new(EDITOR_WIDGET_ID);
@@ -1092,13 +1097,12 @@ impl RapidNotesApp {
     ) {
         let mut new_clicked = false;
         let mut grid_clicked = false;
-        let mut preview_clicked = false;
         let mut copy_clicked = false;
         let mut pin_clicked = false;
         let mut settings_clicked = false;
         let mut hide_clicked = false;
 
-        let controls_w = 7.0 * TOP_BAR_BUTTON_SIZE + 6.0 * 4.0 + 14.0;
+        let controls_w = 6.0 * TOP_BAR_BUTTON_SIZE + 5.0 * 4.0 + 14.0;
         let drag_rect = Rect::from_min_max(
             bar_rect.min,
             Pos2::new((bar_rect.max.x - controls_w).max(bar_rect.min.x + 60.0), bar_rect.max.y),
@@ -1138,6 +1142,11 @@ impl RapidNotesApp {
             ui.add_space(10.0);
             ui.spacing_mut().item_spacing.x = 4.0;
 
+            let hide_tooltip = if self.config.always_on_top {
+                "Unpin to Hide".to_string()
+            } else {
+                format!("Hide to Tray ({})", self.config.keybinds.hide_window)
+            };
             if glass_icon_button(
                 ui,
                 "btn_hide",
@@ -1145,7 +1154,7 @@ impl RapidNotesApp {
                 TOP_BAR_BUTTON_SIZE,
                 false,
                 alpha,
-                &format!("Hide to Tray ({})", self.config.keybinds.hide_window),
+                &hide_tooltip,
                 draw_hide_icon,
             )
             .clicked()
@@ -1168,6 +1177,17 @@ impl RapidNotesApp {
                 settings_clicked = true;
             }
 
+            let pin_tooltip = if self.config.always_on_top {
+                format!(
+                    "Unpin from Top ({})",
+                    self.config.keybinds.toggle_always_on_top
+                )
+            } else {
+                format!(
+                    "Pin Always on Top ({})",
+                    self.config.keybinds.toggle_always_on_top
+                )
+            };
             if glass_icon_button(
                 ui,
                 "btn_pin",
@@ -1175,7 +1195,7 @@ impl RapidNotesApp {
                 TOP_BAR_BUTTON_SIZE,
                 self.config.always_on_top,
                 alpha,
-                &format!("Always on Top ({})", self.config.keybinds.toggle_always_on_top),
+                &pin_tooltip,
                 draw_pin_icon,
             )
             .clicked()
@@ -1196,26 +1216,6 @@ impl RapidNotesApp {
             .clicked()
             {
                 copy_clicked = true;
-            }
-
-            let preview_icon = if self.preview_mode {
-                draw_edit_icon
-            } else {
-                draw_eye_icon
-            };
-            if glass_icon_button(
-                ui,
-                "btn_preview",
-                palette,
-                TOP_BAR_BUTTON_SIZE,
-                self.preview_mode,
-                alpha,
-                &format!("Toggle Preview ({})", self.config.keybinds.toggle_preview),
-                preview_icon,
-            )
-            .clicked()
-            {
-                preview_clicked = true;
             }
 
             if glass_icon_button(
@@ -1255,9 +1255,6 @@ impl RapidNotesApp {
         if grid_clicked {
             self.enter_grid_mode(ctx);
         }
-        if preview_clicked {
-            self.execute_in_app_action(ctx, InAppAction::TogglePreview);
-        }
         if copy_clicked {
             self.execute_in_app_action(ctx, InAppAction::CopyNote);
         }
@@ -1268,7 +1265,11 @@ impl RapidNotesApp {
             self.open_settings_window(ctx);
         }
         if hide_clicked {
-            self.hide_to_tray(ctx);
+            if self.config.always_on_top {
+                self.show_toast("Pinned on top — unpin to hide");
+            } else {
+                self.hide_to_tray(ctx);
+            }
         }
     }
 
@@ -1527,16 +1528,6 @@ impl RapidNotesApp {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    if self.preview_mode {
-                        if let Some(note) = self.notes.active_note_mut() {
-                            if render_markdown_preview(ui, &mut note.content, font_size, &palette_copy) {
-                                note.dirty = true;
-                                self.notes_dirty_since = Some(Instant::now());
-                            }
-                        }
-                        return;
-                    }
-
                     let mut layouter = |ui: &egui::Ui, text: &str, wrap_width: f32| {
                         let effective_wrap = if !math_results.is_empty() {
                             (wrap_width - 78.0).max(140.0)
@@ -1555,6 +1546,7 @@ impl RapidNotesApp {
 
                     let avail_w = ui.available_width().max(120.0);
                     let min_rows = ((scroll_h / (font_size * 1.35)).floor() as usize).max(6);
+                    let active_idx = self.notes.active_idx;
 
                     if let Some(note) = self.notes.active_note_mut() {
                         let editor_id = Id::new(EDITOR_WIDGET_ID);
@@ -1591,13 +1583,96 @@ impl RapidNotesApp {
                                 .state
                                 .cursor
                                 .set_char_range(Some(CCursorRange::two(CCursor::new(a), CCursor::new(b))));
-                            output.state.store(ctx, editor_id);
+                            output.state.clone().store(ctx, editor_id);
                             output.response.request_focus();
                         }
 
                         if output.response.changed() {
                             note.dirty = true;
                             self.notes_dirty_since = Some(Instant::now());
+                        }
+
+                        let checklist_boxes = find_checklist_boxes(&note.content);
+                        let mut clicked_checkbox: Option<ChecklistBoxSpan> = None;
+                        for item in &checklist_boxes {
+                            let start_rect = output
+                                .galley
+                                .pos_from_ccursor(CCursor::new(item.box_start_char));
+                            let end_rect = output
+                                .galley
+                                .pos_from_ccursor(CCursor::new(item.box_end_char));
+                            if (start_rect.min.y - end_rect.min.y).abs() > 1.0
+                                || end_rect.min.x <= start_rect.min.x
+                            {
+                                continue;
+                            }
+
+                            let box_rect = Rect::from_min_max(
+                                output.galley_pos + start_rect.min.to_vec2(),
+                                output.galley_pos + end_rect.max.to_vec2(),
+                            );
+                            let hit_rect = box_rect.expand2(Vec2::new(2.0, 1.0));
+                            if !ui.is_rect_visible(hit_rect) {
+                                continue;
+                            }
+
+                            let cb_resp = ui
+                                .interact(
+                                    hit_rect,
+                                    Id::new(("md_checkbox", active_idx, item.line_idx)),
+                                    Sense::click(),
+                                )
+                                .on_hover_cursor(CursorIcon::PointingHand)
+                                .on_hover_text(if item.checked {
+                                    "Click to uncheck"
+                                } else {
+                                    "Click to check"
+                                });
+
+                            if cb_resp.hovered() {
+                                let tint = if item.checked {
+                                    palette_copy.success_text
+                                } else {
+                                    palette_copy.accent_text
+                                };
+                                ui.painter().rect_filled(
+                                    hit_rect,
+                                    CornerRadius::same(4),
+                                    tint.gamma_multiply(0.18),
+                                );
+                                ui.painter().rect_stroke(
+                                    hit_rect,
+                                    CornerRadius::same(4),
+                                    Stroke::new(1.0_f32, tint.gamma_multiply(0.55)),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+
+                            if cb_resp.clicked() {
+                                clicked_checkbox = Some(*item);
+                            }
+                        }
+
+                        if let Some(item) = clicked_checkbox {
+                            let prev_range = output
+                                .state
+                                .cursor
+                                .char_range()
+                                .unwrap_or_else(|| CCursorRange::one(CCursor::new(item.after_prefix_char)));
+                            let mut undoer = output.state.undoer();
+                            undoer.add_undo(&(prev_range, note.content.clone()));
+
+                            if toggle_checklist_box_at_byte(&mut note.content, item.state_byte) {
+                                let new_range = CCursorRange::one(CCursor::new(item.after_prefix_char));
+                                output.state.cursor.set_char_range(Some(new_range));
+                                undoer.add_undo(&(new_range, note.content.clone()));
+                                output.state.set_undoer(undoer);
+                                output.state.store(ctx, editor_id);
+                                output.response.request_focus();
+                                note.dirty = true;
+                                self.notes_dirty_since = Some(Instant::now());
+                                ctx.request_repaint();
+                            }
                         }
 
                         if !math_results.is_empty() {
@@ -2312,10 +2387,6 @@ impl RapidNotesApp {
                 self.settings_buffers.in_app_keybind_feedback = None;
                 let _ = self.config.save();
             }
-            SettingsAction::AlwaysOnTopChanged(aot) => {
-                self.set_always_on_top(root_ctx, aot);
-                root_ctx.request_repaint();
-            }
             SettingsAction::ConfigSaved => {
                 let _ = self.config.save();
                 root_ctx.request_repaint();
@@ -2536,7 +2607,7 @@ impl eframe::App for RapidNotesApp {
 
         if animating {
             ctx.request_repaint_after(Duration::from_millis(16));
-        } else if !self.window_hidden && self.config.hide_on_focus_loss {
+        } else if !self.window_hidden && self.config.hide_on_focus_loss && !self.config.always_on_top {
             ctx.request_repaint_after(Duration::from_millis(160));
         } else if nav_flashing
             || self.notes_dirty_since.is_some()
@@ -2561,6 +2632,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             Duration::from_millis(1500),
             5,
             0,
@@ -2572,6 +2644,7 @@ mod tests {
         ));
         assert!(!RapidNotesApp::should_hide_on_focus_loss(
             true,
+            false,
             false,
             false,
             Duration::from_millis(1500),
@@ -2591,6 +2664,7 @@ mod tests {
         assert!(!RapidNotesApp::should_hide_on_focus_loss(
             true,
             false,
+            false,
             true,
             Duration::from_millis(80),
             5,
@@ -2604,6 +2678,7 @@ mod tests {
         // Once had focus and >= 120ms elapsed, losing focus closes
         assert!(RapidNotesApp::should_hide_on_focus_loss(
             true,
+            false,
             false,
             true,
             Duration::from_millis(120),
@@ -2623,6 +2698,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             Duration::from_millis(799),
             5,
             0,
@@ -2634,6 +2710,7 @@ mod tests {
         ));
         assert!(RapidNotesApp::should_hide_on_focus_loss(
             true,
+            false,
             false,
             false,
             Duration::from_millis(800),
@@ -2649,8 +2726,24 @@ mod tests {
 
     #[test]
     fn test_should_hide_guards_disabled_settings_resize_uncloak_and_startup() {
+        // Pinned on top (always_on_top = true) never hides on focus loss
+        assert!(!RapidNotesApp::should_hide_on_focus_loss(
+            true,
+            true,
+            false,
+            true,
+            Duration::from_millis(500),
+            5,
+            0,
+            false,
+            false,
+            Some(100),
+            None,
+            Some(300),
+        ));
         // Disabled config
         assert!(!RapidNotesApp::should_hide_on_focus_loss(
+            false,
             false,
             false,
             true,
@@ -2666,6 +2759,7 @@ mod tests {
         // Currently focused
         assert!(!RapidNotesApp::should_hide_on_focus_loss(
             true,
+            false,
             true,
             true,
             Duration::from_millis(500),
@@ -2681,6 +2775,7 @@ mod tests {
         assert!(!RapidNotesApp::should_hide_on_focus_loss(
             true,
             false,
+            false,
             true,
             Duration::from_millis(500),
             5,
@@ -2694,6 +2789,7 @@ mod tests {
         // Resizing drag active
         assert!(!RapidNotesApp::should_hide_on_focus_loss(
             true,
+            false,
             false,
             true,
             Duration::from_millis(500),
@@ -2709,6 +2805,7 @@ mod tests {
         assert!(!RapidNotesApp::should_hide_on_focus_loss(
             true,
             false,
+            false,
             true,
             Duration::from_millis(500),
             5,
@@ -2722,6 +2819,7 @@ mod tests {
         // Startup frames < 5
         assert!(!RapidNotesApp::should_hide_on_focus_loss(
             true,
+            false,
             false,
             true,
             Duration::from_millis(500),

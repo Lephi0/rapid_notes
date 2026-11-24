@@ -7,14 +7,14 @@ Fast, lightweight, translucent Windows 11 scratchpad and local Markdown note-tak
 - **Windows 11 DWM Acrylic Glass UI**:
   - Frameless translucent Acrylic window with `Dark`, `Light`, and `System` (auto-follows Windows theme) presets and configurable tint opacity (`10%`–`95%`)
   - Hover-reveal top and bottom toolbars (or always visible), draggable top header, bottom-right resize grip, and smooth slide transitions when switching notes
-  - Tray-only background operation (`with_taskbar(false)`) with optional Always on Top, Start Hidden in System Tray, and Hide When Window Loses Focus
+  - Tray-only background operation (`with_taskbar(false)`) with Start Hidden in System Tray, Hide When Window Loses Focus, and a top-bar Pin button (`Alt+Shift+T` / tray menu) that keeps the note truly Always on Top and prevents hiding while pinned
 - **Instant Global Summon & Multi-Monitor Support**:
   - System-wide summon/hide hotkey (`Win+Shift+A` by default) with side-aware Left/Right modifier recording (`LWin`, `RWin`, `LCtrl`, `RCtrl`, `LAlt`, `RAlt`, `LShift`, `RShift`)
   - Opens on either the **Main Monitor** (restoring its last position) or **Where Mouse Is** (centered on the cursor's current monitor)
-- **Markdown Editing & Interactive Preview**:
+- **Markdown Editing & Clickable Checklists**:
   - Live syntax highlighting for headings (`#`–`######`), **bold**, *italic*, ~~strikethrough~~, `inline code`, fenced code blocks, blockquotes, bullet/numbered lists, task checklists (`- [ ]` / `- [x]`), horizontal rules, Markdown links, and bare `http://`/`https://` URLs
   - Smart `Enter` continuation for bullet lists, auto-incrementing numbered lists, and checklists (pressing `Enter` on an empty list item exits the list)
-  - Toggleable rendered Markdown preview mode (`Ctrl+Shift+P`) with clickable checkboxes that update the note directly
+  - Click any Markdown checkbox (`[ ]` / `[x]`) directly in the editor to toggle it in place (with full `Ctrl+Z` undo support), or press `Ctrl+L` to toggle the current line
   - Configurable editor font (defaults to `Courier New`, selectable from installed system monospace and proportional fonts) and text size (`10`–`32 px`)
 - **Live Inline Math & Calculations**:
   - Evaluates arithmetic (`+`, `-`, `*`/`×`, `/`/`÷`, `^`, parentheses), variables (`rent = 1,200`), `pi`, percentages (`20% of 150`, `100 + 15%`), currencies (`$`, `€`, `£`), and running aggregates (`sum`, `total`, `avg`, `mean`) while skipping headings, checklists, quotes, dates, and code fences
@@ -41,7 +41,6 @@ All global and in-app shortcuts can be recorded or customized in **Settings → 
 | New Note | `Ctrl+N` |
 | Delete Current Note | `Ctrl+Shift+D` |
 | Search Notes | `Ctrl+F` |
-| Toggle Markdown Preview | `Ctrl+Shift+P` |
 | Copy Note to Clipboard | `Ctrl+Shift+C` |
 | Toggle Checklist Item | `Ctrl+L` |
 | Format Bold / Italic / Inline Code | `Ctrl+B` / `Ctrl+I` / `Ctrl+E` |

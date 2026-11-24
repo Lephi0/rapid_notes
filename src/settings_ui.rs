@@ -123,7 +123,6 @@ pub enum SettingsAction {
     ApplyGlobalHotkey(String),
     ApplyInAppKeybind(KeybindSlot, String),
     ResetAllKeybinds,
-    AlwaysOnTopChanged(bool),
     ConfigSaved,
 }
 
@@ -523,18 +522,6 @@ pub fn render_system_tab(
         }
 
         ui.add_space(6.0);
-        let mut aot = config.always_on_top;
-        if glass_toggle_row(
-            ui,
-            "rn_sys_aot",
-            palette,
-            "Always on Top",
-            Some("Float Rapid Notes above other windows when summoned"),
-            &mut aot,
-        ) {
-            actions.push(SettingsAction::AlwaysOnTopChanged(aot));
-        }
-
         if glass_toggle_row(
             ui,
             "rn_sys_start_hidden",
@@ -551,7 +538,7 @@ pub fn render_system_tab(
             "rn_sys_hide_blur",
             palette,
             "Hide When Window Loses Focus",
-            Some("Hide to background tray waiting for your open keybind when clicking elsewhere"),
+            Some("Hide to background tray when clicking elsewhere (paused while pinned on top)"),
             &mut config.hide_on_focus_loss,
         ) {
             actions.push(SettingsAction::ConfigSaved);
