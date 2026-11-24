@@ -18,17 +18,17 @@ use egui::{
 };
 use egui_glass_ui::{
     apply_glass_visuals, compute_overlay_rect_in_work_area, configure_tray_only_window,
-    draw_glass_surface, draw_glass_tab_bar_with_icons, extract_hwnd,
+    draw_glass_surface, draw_glass_tab_bar_with_icons, extract_hwnd, flush_dwm, focus_window,
     get_cursor_monitor_work_area_px, get_foreground_hwnd, get_monitor_work_area_for_hwnd,
     get_primary_monitor_work_area_px, get_window_pos_px, glass_button, glass_grid_card,
     glass_icon_button, glass_pagination_dots, glass_primary_button, glass_toast_pill,
     hide_window, hover_chrome_opacity, install_glass_fonts, is_pos_on_any_monitor,
     is_window_foreground, is_windows_light_theme, position_window_px_no_activate,
-    resize_window_px, resolve_window_pos_in_work_area, set_window_always_on_top,
-    set_window_cloaked, set_window_pos_px_checked, show_window_at_px, show_window_to_front,
-    trim_process_working_set, unregister_raw_keyboard_input, BackgroundMode, GlassPalette,
-    GlassStyle, GlassTintPreset, GlassWindow, GlassWindowBackdrop, GlassWindowConfig,
-    EDITOR_FONT_FAMILY,
+    prepare_window_cloaked_at_px, resize_window_px, resolve_window_pos_in_work_area,
+    set_window_always_on_top, set_window_cloaked, set_window_pos_px_checked, show_window_at_px,
+    show_window_to_front, trim_process_working_set, unregister_raw_keyboard_input,
+    wake_cloaked_window, BackgroundMode, GlassPalette, GlassStyle, GlassTintPreset, GlassWindow,
+    GlassWindowBackdrop, GlassWindowConfig, EDITOR_FONT_FAMILY,
 };
 use icons::{
     draw_chevron_left_icon, draw_chevron_right_icon, draw_copy_icon, draw_gear_icon,
@@ -97,7 +97,7 @@ fn main() -> eframe::Result<()> {
         .with_transparent(true)
         .with_taskbar(false)
         .with_resizable(false)
-        .with_visible(!config.start_hidden)
+        .with_visible(false)
         .with_icon(app_icon.clone())
         .with_window_level(if config.always_on_top {
             WindowLevel::AlwaysOnTop
@@ -129,6 +129,7 @@ struct RapidNotesApp {
     backdrop: GlassWindowBackdrop,
     last_applied_size: Option<(Vec2, [i32; 2])>,
     startup_frames: u8,
+    startup_hide_after_warmup: bool,
 
     // Visibility & OS integration
     wake_state: Arc<SharedWakeState>,
@@ -151,6 +152,7 @@ struct RapidNotesApp {
     saved_editor_pos_px: Option<[i32; 2]>,
     pending_cloak_rect_px: Option<([i32; 2], [i32; 2])>,
     uncloak_frames_remaining: u8,
+    cloak_started_this_frame: bool,
     search_open: bool,
     search_query: String,
     grid_selected_idx: usize,
@@ -208,23 +210,18 @@ impl RapidNotesApp {
             GlobalHotkeyController::new(&config.keybinds.global_toggle_app, Arc::clone(&wake_state));
         let tray_controller = TrayController::new(config.always_on_top, Arc::clone(&wake_state));
 
+        let editor_size = Vec2::new(config.window_size[0], config.window_size[1]);
         let ppp = cc.egui_ctx.pixels_per_point().max(1.0);
         let size_px = [
-            (config.window_size[0] * ppp).round() as i32,
-            (config.window_size[1] * ppp).round() as i32,
+            (editor_size.x * ppp).round() as i32,
+            (editor_size.y * ppp).round() as i32,
         ];
-        let initial_pos_px = Self::compute_open_pos_px(&config, size_px);
-        let target_px =
-            set_window_pos_px_checked(hwnd, Some(initial_pos_px), size_px[0], size_px[1]);
+        let target_px = Self::compute_open_pos_px(&config, size_px);
+        set_window_cloaked(hwnd, true);
+        position_window_px_no_activate(hwnd, target_px, size_px);
+        set_window_always_on_top(hwnd, config.always_on_top);
         config.window_pos = Some([target_px[0] as f32, target_px[1] as f32]);
         let _ = config.save();
-
-        if start_hidden {
-            hide_window(hwnd);
-        } else {
-            show_window_to_front(hwnd, config.always_on_top);
-            set_window_always_on_top(hwnd, config.always_on_top);
-        }
 
         let settings_window = Some(GlassWindow::new(
             GlassWindowConfig::new(
@@ -260,13 +257,14 @@ impl RapidNotesApp {
             hwnd,
             windows_is_light,
             backdrop: GlassWindowBackdrop::new(),
-            last_applied_size: None,
+            last_applied_size: Some((editor_size, size_px)),
             startup_frames: 0,
+            startup_hide_after_warmup: start_hidden,
             wake_state,
             hotkey_controller,
             tray_controller,
             window_hidden,
-            had_focus_since_show: !window_hidden && is_window_foreground(hwnd),
+            had_focus_since_show: false,
             foreground_at_summon: None,
             focus_retry_remaining: 0,
             shown_at: Instant::now(),
@@ -278,6 +276,7 @@ impl RapidNotesApp {
             saved_editor_pos_px: None,
             pending_cloak_rect_px: None,
             uncloak_frames_remaining: 0,
+            cloak_started_this_frame: false,
             search_open: false,
             search_query: String::new(),
             grid_selected_idx,
@@ -299,6 +298,23 @@ impl RapidNotesApp {
         };
 
         app.ensure_dwm_synced();
+        if start_hidden {
+            // Warm up OpenGL shaders/font atlas while cloaked so the first summon reveals instantly.
+            wake_cloaked_window(hwnd);
+        } else {
+            let got_focus = prepare_window_cloaked_at_px(
+                hwnd,
+                target_px,
+                size_px,
+                app.config.always_on_top,
+            );
+            app.had_focus_since_show = got_focus;
+            app.focus_retry_remaining = if got_focus { 0 } else { 3 };
+            app.uncloak_frames_remaining = 2;
+            app.backdrop.invalidate();
+            app.ensure_dwm_synced();
+        }
+        cc.egui_ctx.request_repaint();
         app
     }
 
@@ -375,6 +391,7 @@ impl RapidNotesApp {
         set_window_cloaked(self.hwnd, true);
         self.pending_cloak_rect_px = Some((pos_px, size_px));
         self.uncloak_frames_remaining = 2;
+        self.cloak_started_this_frame = true;
         ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::MinInnerSize(logical_size));
         ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::MaxInnerSize(logical_size));
         ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::InnerSize(logical_size));
@@ -428,7 +445,9 @@ impl RapidNotesApp {
             self.backdrop.invalidate();
         }
 
+        self.startup_hide_after_warmup = false;
         self.uncloak_frames_remaining = 0;
+        self.cloak_started_this_frame = false;
         self.pending_cloak_rect_px = None;
         self.window_hidden = true;
         self.had_focus_since_show = false;
@@ -440,6 +459,8 @@ impl RapidNotesApp {
     }
 
     fn show_and_focus_window(&mut self, ctx: &Context) {
+        let was_hidden = self.window_hidden;
+        self.startup_hide_after_warmup = false;
         self.window_hidden = false;
         self.shown_at = Instant::now();
         self.wake_state.set_hidden(false);
@@ -451,25 +472,45 @@ impl RapidNotesApp {
             (editor_size.y * ppp).round() as i32,
         ];
         let pos_px = Self::compute_open_pos_px(&self.config, size_px);
+        let size_changed = self.last_applied_size != Some((editor_size, size_px));
         self.last_observed_pos_px = Some(pos_px);
         self.last_applied_size = Some((editor_size, size_px));
 
         let prev_fg = get_foreground_hwnd().filter(|&fg| Some(fg) != self.hwnd);
 
-        ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::MinInnerSize(editor_size));
-        ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::MaxInnerSize(editor_size));
-        ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::InnerSize(editor_size));
+        if size_changed {
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::MinInnerSize(editor_size));
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::MaxInnerSize(editor_size));
+            ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::InnerSize(editor_size));
+        }
         configure_tray_only_window(self.hwnd);
-        show_window_at_px(self.hwnd, pos_px, size_px, self.config.always_on_top);
-        ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Focus);
 
-        let got_focus = is_window_foreground(self.hwnd);
-        self.had_focus_since_show = got_focus;
-        self.foreground_at_summon = if got_focus { None } else { prev_fg };
-        self.focus_retry_remaining = if got_focus { 0 } else { 3 };
+        if was_hidden {
+            let got_focus =
+                prepare_window_cloaked_at_px(self.hwnd, pos_px, size_px, self.config.always_on_top);
+            if !got_focus {
+                ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Focus);
+            }
+            self.had_focus_since_show = got_focus;
+            self.foreground_at_summon = if got_focus { None } else { prev_fg };
+            self.focus_retry_remaining = if got_focus { 0 } else { 3 };
+            self.backdrop.invalidate();
+            self.ensure_dwm_synced();
+            self.pending_cloak_rect_px = None;
+            self.uncloak_frames_remaining = 2;
+            self.cloak_started_this_frame = true;
+        } else {
+            show_window_at_px(self.hwnd, pos_px, size_px, self.config.always_on_top);
+            if !is_window_foreground(self.hwnd) {
+                ctx.send_viewport_cmd_to(ViewportId::ROOT, ViewportCommand::Focus);
+            }
+            let got_focus = is_window_foreground(self.hwnd);
+            self.had_focus_since_show = got_focus;
+            self.foreground_at_summon = if got_focus { None } else { prev_fg };
+            self.focus_retry_remaining = if got_focus { 0 } else { 3 };
+            self.ensure_dwm_synced();
+        }
 
-        self.backdrop.invalidate();
-        self.ensure_dwm_synced();
         if self.view_mode == ViewMode::Editor {
             self.editor_focus_pending = true;
         }
@@ -749,7 +790,7 @@ impl RapidNotesApp {
             }
         }
 
-        if self.window_hidden {
+        if self.window_hidden && !self.startup_hide_after_warmup {
             hide_window(self.hwnd);
             set_window_cloaked(self.hwnd, false);
         }
@@ -2443,18 +2484,35 @@ impl eframe::App for RapidNotesApp {
             return;
         }
 
+        let just_cloaked = std::mem::take(&mut self.cloak_started_this_frame);
+
         if self.uncloak_frames_remaining > 0 {
-            self.uncloak_frames_remaining -= 1;
-            if self.uncloak_frames_remaining == 0 {
+            if !just_cloaked {
+                self.uncloak_frames_remaining -= 1;
+            }
+            if self.uncloak_frames_remaining == 1 {
                 if let Some((pos, size_px)) = self.pending_cloak_rect_px.take() {
                     if !self.window_hidden {
                         position_window_px_no_activate(self.hwnd, pos, size_px);
                     }
                 }
+                self.ensure_dwm_synced();
+                if !self.window_hidden && !is_window_foreground(self.hwnd) {
+                    let _ = focus_window(self.hwnd);
+                }
+            } else if self.uncloak_frames_remaining == 0 {
                 if !self.window_hidden {
-                    self.backdrop.invalidate();
+                    if let Some((pos, size_px)) = self.pending_cloak_rect_px.take() {
+                        position_window_px_no_activate(self.hwnd, pos, size_px);
+                    }
                     self.ensure_dwm_synced();
-                    show_window_to_front(self.hwnd, self.config.always_on_top);
+                    flush_dwm();
+                    set_window_cloaked(self.hwnd, false);
+                    if is_window_foreground(self.hwnd) {
+                        self.had_focus_since_show = true;
+                        self.focus_retry_remaining = 0;
+                        self.foreground_at_summon = None;
+                    }
                 }
             }
         } else {
@@ -2589,14 +2647,20 @@ impl eframe::App for RapidNotesApp {
             }
             self.startup_frames += 1;
             if self.startup_frames == 4 {
+                if self.startup_hide_after_warmup {
+                    self.startup_hide_after_warmup = false;
+                    if self.window_hidden {
+                        hide_window(self.hwnd);
+                        set_window_cloaked(self.hwnd, false);
+                    }
+                }
                 trim_process_working_set();
             }
             ctx.request_repaint();
         }
 
-        let animating = self.uncloak_frames_remaining > 0
+        let animating = self.slide_started_at.is_some()
             || self.focus_retry_remaining > 0
-            || self.slide_started_at.is_some()
             || self.toast.is_some()
             || (top_alpha > 0.01 && top_alpha < 0.99)
             || (bottom_alpha > 0.01 && bottom_alpha < 0.99)
@@ -2605,7 +2669,9 @@ impl eframe::App for RapidNotesApp {
                 .as_ref()
                 .is_some_and(|w| w.is_activating());
 
-        if animating {
+        if self.uncloak_frames_remaining > 0 || self.startup_hide_after_warmup {
+            ctx.request_repaint();
+        } else if animating {
             ctx.request_repaint_after(Duration::from_millis(16));
         } else if !self.window_hidden && self.config.hide_on_focus_loss && !self.config.always_on_top {
             ctx.request_repaint_after(Duration::from_millis(160));
